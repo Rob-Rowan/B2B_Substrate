@@ -9,14 +9,15 @@ ribbon, and three functional tabs:
    ``website``.
 2. Cold Triage Desk — review ``QUALIFIED`` leads, generate a default
    personalized draft via the Jinja2 interpolation engine, edit it,
-   and move the lead through the status lifecycle.
-3. Master Ledger — a searchable data grid of every lead with manual
-   status-override controls constrained to the legal transition graph.
+   and dispatch it live through the Google Workspace SMTP relay.
+3. Master Ledger — a searchable data grid of every lead with an
+   unconstrained manual status-override control that can force-set
+   any lead to any of the six valid lifecycle states.
 
-This UI layer talks exclusively to :mod:`lead_service`, which in turn
-talks exclusively to the SQLAlchemy ORM in :mod:`models` through the
-session factory in :mod:`database`.  There is no LLM provider, no web
-scraper, and no outbound SMTP relay anywhere in this application.
+This UI layer talks exclusively to :mod:`lead_service` for all data
+access, and to :mod:`email_service` for the single outbound SMTP
+dispatch call on the Cold Triage Desk.  There is no LLM provider and
+no web scraper anywhere in this application.
 """
 
 from __future__ import annotations
@@ -25,17 +26,20 @@ from typing import Any, Final
 
 import streamlit as st
 
-from config import ALLOWED_TRANSITIONS, LEAD_STATES, load_config
+from config import DAILY_SEND_CAP, LEAD_STATES, load_config
 from database import get_session, init_db
+from email_service import EmailService
 from lead_service import (
     DuplicateLeadError,
-    InvalidTransitionError,
     LeadNotFoundError,
     UnknownStatusError,
+    cleanup_legacy_statuses,
     count_all_leads,
+    count_leads_sent_today,
     create_lead,
     list_leads,
-    transition_lead_status,
+    record_lead_touch,
+    update_status,
 )
 from models import Lead
 from templates_engine import render_draft
@@ -388,17 +392,33 @@ def render_triage_desk() -> None:
     with ``status == "QUALIFIED"``. Selecting a lead auto-populates a
     personalized email pitch draft (contact first name + tech stack
     interpolation) via the deterministic Jinja2 template engine in
-    :mod:`templates_engine`, fully editable before queuing. The
-    "Queue Lead" action is the only lifecycle mutation available on
-    this desk: it persists the edited subject/body and transitions the
-    lead directly to ``QUEUED``. There is no LLM reasoning/evaluation
-    output anywhere on this desk, and no background AI evaluation loop
-    is ever triggered by this application.
+    :mod:`templates_engine`, fully editable before send.
+
+    The primary "Send Email Now" action:
+
+    1. Checks the current daily sent count against the configured
+       daily send cap (from ``.env`` / the sidebar override). If the
+       cap has been reached, execution is blocked with a UI warning
+       and no SMTP call is made.
+    2. Calls :meth:`email_service.EmailService.send_cold_email` using
+       the lead's verified email and the exact (edited) Subject/Body
+       text currently in the UI fields.
+    3. Only if the SMTP dispatch returns ``True`` does this desk call
+       ``lead_service.update_status(lead_id, "SENT")`` and record the
+       touch event in ``lead_touches``. A failed dispatch instead
+       records a ``FAILED`` touch and leaves the lead's status
+       untouched.
+    4. Displays an explicit ``st.success``/``st.error`` toast
+       reflecting the outcome.
+
+    There is no LLM reasoning/evaluation output anywhere on this
+    desk, and no background AI evaluation loop is ever triggered by
+    this application.
     """
     st.subheader("Cold Triage Desk")
     st.caption(
         "Select a QUALIFIED lead, review the auto-populated pitch "
-        "draft, edit it if needed, and queue it for outreach."
+        "draft, edit it if needed, and send it live via SMTP."
     )
 
     with get_session() as session:
@@ -406,6 +426,10 @@ def render_triage_desk() -> None:
             lead_to_dict(lead)
             for lead in list_leads(session, status="QUALIFIED")
         ]
+        sent_today = count_leads_sent_today(session)
+
+    daily_cap = int(st.session_state.get("daily_send_cap", DAILY_SEND_CAP))
+    cap_reached = sent_today >= daily_cap
 
     if not qualified_leads:
         st.info("No QUALIFIED leads awaiting triage.")
@@ -423,6 +447,13 @@ def render_triage_desk() -> None:
     lead_id = int(lead_dict["id"])
 
     render_lead_card(lead_dict)
+
+    recipient_email = lead_dict.get("verified_email")
+    if not recipient_email:
+        st.warning(
+            "This lead has no verified_email on record. A live send "
+            "cannot be dispatched until an email address is added."
+        )
 
     subject_key = f"triage_subject_{lead_id}"
     body_key = f"triage_body_{lead_id}"
@@ -443,7 +474,14 @@ def render_triage_desk() -> None:
     edited_subject = st.text_input("Subject", key=subject_key)
     edited_body = st.text_area("Body", height=220, key=body_key)
 
-    col_regen, col_queue = st.columns([1, 1])
+    if cap_reached:
+        st.warning(
+            f"Daily outreach cap reached ({sent_today} / {daily_cap} "
+            f"sent today). Sending is blocked until tomorrow or the "
+            f"cap is raised in the sidebar."
+        )
+
+    col_regen, col_send = st.columns([1, 1])
     with col_regen:
         if st.button("Regenerate Draft", key=f"regen_{lead_id}"):
             draft = render_draft(
@@ -454,33 +492,89 @@ def render_triage_desk() -> None:
             st.session_state[subject_key] = draft.subject
             st.session_state[body_key] = draft.body
             st.rerun()
-    with col_queue:
-        if st.button("Queue Lead", key=f"queue_{lead_id}", type="primary"):
-            with get_session() as session:
-                lead = session.get(Lead, lead_id)
-                if lead is not None:
-                    lead.custom_subject = edited_subject or None
-                    lead.custom_pitch = edited_body or None
-                try:
-                    transition_lead_status(session, lead_id, "QUEUED")
-                    st.success(f"Lead #{lead_id} queued for outreach.")
-                except (
-                    LeadNotFoundError,
-                    UnknownStatusError,
-                    InvalidTransitionError,
-                ) as exc:
-                    st.error(exc.payload.detail)
-            st.session_state.pop(subject_key, None)
-            st.session_state.pop(body_key, None)
-            st.rerun()
+    with col_send:
+        send_clicked = st.button(
+            "Send Email Now",
+            key=f"send_{lead_id}",
+            type="primary",
+            disabled=cap_reached or not recipient_email,
+        )
+        if send_clicked:
+            if cap_reached:
+                st.error(
+                    f"Blocked: daily send cap of {daily_cap} already "
+                    f"reached."
+                )
+            elif not recipient_email:
+                st.error(
+                    "Blocked: this lead has no verified_email on "
+                    "record."
+                )
+            else:
+                with get_session() as session:
+                    lead = session.get(Lead, lead_id)
+                    if lead is not None:
+                        lead.custom_subject = edited_subject or None
+                        lead.custom_pitch = edited_body or None
+                        session.flush()
+
+                email_service = EmailService()
+                delivered = email_service.send_cold_email(
+                    to_email=recipient_email,
+                    subject=edited_subject,
+                    body_text=edited_body,
+                )
+
+                if delivered:
+                    with get_session() as session:
+                        try:
+                            update_status(session, lead_id, "SENT")
+                            record_lead_touch(
+                                session,
+                                lead_id,
+                                touch_type="EMAIL",
+                                subject=edited_subject,
+                                body=edited_body,
+                                status="SENT",
+                            )
+                            st.success(
+                                f"Email sent to {recipient_email} — "
+                                f"Lead #{lead_id} marked SENT."
+                            )
+                        except (
+                            LeadNotFoundError,
+                            UnknownStatusError,
+                        ) as exc:
+                            st.error(exc.payload.detail)
+                    st.session_state.pop(subject_key, None)
+                    st.session_state.pop(body_key, None)
+                    st.rerun()
+                else:
+                    with get_session() as session:
+                        record_lead_touch(
+                            session,
+                            lead_id,
+                            touch_type="EMAIL",
+                            subject=edited_subject,
+                            body=edited_body,
+                            status="FAILED",
+                        )
+                    st.error(
+                        f"Failed to send email to {recipient_email}. "
+                        f"Lead status unchanged. Check SMTP "
+                        f"credentials and logs."
+                    )
 
 
 def render_master_ledger() -> None:
     """Render the Master Ledger tab.
 
-    Provides a searchable data grid of all leads plus manual status
-    override controls constrained to the legal transition graph
-    defined in :data:`config.ALLOWED_TRANSITIONS`.
+    Provides a searchable data grid of all leads plus an
+    unconstrained manual status override control: any lead can be
+    force-set to any of the six valid lifecycle states (``QUALIFIED``,
+    ``QUEUED``, ``SENT``, ``REPLIED``, ``DISQUALIFIED``,
+    ``ARCHIVED``), with no legal-transition-graph restrictions
+    whatsoever.
     """
     st.subheader("Master Ledger")
     st.caption("Search all leads and manually override their status.")
@@ -543,29 +637,28 @@ def render_master_ledger() -> None:
         current_status = current_lead.status if current_lead else "QUALIFIED"
 
     st.caption(f"Current status: {current_status}")
-
-    allowed_targets = sorted(
-        ALLOWED_TRANSITIONS.get(current_status, frozenset())
+    st.caption(
+        "This override is unconstrained: any lead may be force-set "
+        "to any of the six valid states below, regardless of its "
+        "current status."
     )
-    if not allowed_targets:
-        st.warning(
-            f"No forward transitions are defined for status "
-            f"{current_status!r} (likely a legacy historical status)."
-        )
-        return
 
-    new_status = st.selectbox("New status", options=allowed_targets)
+    status_options = list(LEAD_STATES)
+    default_index = (
+        status_options.index(current_status)
+        if current_status in status_options
+        else 0
+    )
+    new_status = st.selectbox(
+        "New status", options=status_options, index=default_index
+    )
 
     if st.button("Apply Status Override", type="primary"):
         with get_session() as session:
             try:
-                transition_lead_status(session, selected_id, new_status)
+                update_status(session, selected_id, new_status)
                 st.success(f"Lead #{selected_id} moved to {new_status}.")
-            except (
-                LeadNotFoundError,
-                UnknownStatusError,
-                InvalidTransitionError,
-            ) as exc:
+            except (LeadNotFoundError, UnknownStatusError) as exc:
                 st.error(exc.payload.detail)
         st.rerun()
 
@@ -589,12 +682,37 @@ def main() -> None:
     load_config()
     init_db()
 
+    if not st.session_state.get("_legacy_cleanup_done", False):
+        with get_session() as session:
+            cleanup_legacy_statuses(session)
+        st.session_state["_legacy_cleanup_done"] = True
+
     with st.sidebar:
         st.title("📡 B2B Substrate")
         st.caption("Manual Lead Triage & Status Lifecycle")
         st.divider()
         st.markdown("### Status Lifecycle")
         st.caption(" → ".join(LEAD_STATES))
+        st.divider()
+
+        st.markdown("### Daily Outreach")
+        daily_cap = st.number_input(
+            "Daily send cap",
+            min_value=1,
+            max_value=1000,
+            value=int(
+                st.session_state.get("daily_send_cap", DAILY_SEND_CAP)
+            ),
+            step=1,
+            key="daily_send_cap",
+        )
+        with get_session() as session:
+            sent_today = count_leads_sent_today(session)
+        progress_fraction = (
+            min(sent_today / daily_cap, 1.0) if daily_cap > 0 else 0.0
+        )
+        st.progress(progress_fraction)
+        st.caption(f"Daily Outreach: {sent_today} / {daily_cap} Sent")
 
     st.title("📡 B2B Substrate")
     st.caption("Manual lead ingestion, triage, and lifecycle tracking.")

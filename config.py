@@ -2,14 +2,19 @@
 
 This module centralizes configuration values used across the B2B
 Substrate backend: the SQLite database path, the lead status
-lifecycle constants, and the allowed status transition graph.
+lifecycle constants, the allowed status transition graph, and the
+daily outreach send cap enforced by the Cold Triage Desk's live SMTP
+dispatch flow.
 
-All Vertex AI / LLM credential resolution, SMTP relay settings,
-disposable-domain blocklists, prompt-injection signatures, and bulk
-ingestion timeouts have been removed as part of the backend purge —
-this application no longer depends on any external LLM provider,
-web-scraping stack, or outbound mail relay.
+All Vertex AI / LLM credential resolution, disposable-domain
+blocklists, prompt-injection signatures, and bulk ingestion timeouts
+have been removed as part of the backend purge — this application no
+longer depends on any external LLM provider or web-scraping stack.
+The Google Workspace SMTP dispatch engine itself lives in
+:mod:`email_service`; this module only defines the daily send cap
+that gates it.
 """
+
 
 from __future__ import annotations
 
@@ -57,6 +62,17 @@ LEAD_STATES: Final[tuple[str, ...]] = (
 
 # The default status assigned to every newly ingested lead.
 DEFAULT_LEAD_STATE: Final[str] = LEAD_STATE_QUALIFIED
+
+# ---------------------------------------------------------------------------
+# Outreach dispatch limits
+# ---------------------------------------------------------------------------
+
+#: The maximum number of live cold-outreach emails the Cold Triage
+#: Desk is permitted to dispatch per calendar day. Overridable via the
+#: ``DAILY_SEND_CAP`` environment variable, and further adjustable at
+#: runtime from the Streamlit sidebar.
+DAILY_SEND_CAP: Final[int] = int(os.getenv("DAILY_SEND_CAP", "20"))
+
 
 # ---------------------------------------------------------------------------
 # Status transition graph

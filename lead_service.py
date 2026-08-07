@@ -25,12 +25,27 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from config import ALLOWED_TRANSITIONS, DEFAULT_LEAD_STATE, LEAD_STATES
-from models import Lead
+from models import Lead, LeadTouch
 from templates_engine import LeadDraft, render_draft
+
+# ---------------------------------------------------------------------------
+# Legacy status migration
+# ---------------------------------------------------------------------------
+
+#: Maps historical/legacy status strings written by earlier versions
+#: of this application onto the current six-state lifecycle so the UI
+#: never crashes on old rows and every lead can be manually managed
+#: through the current status vocabulary.
+LEGACY_STATUS_MAP: dict[str, str] = {
+    "EMAIL_1_SENT": "SENT",
+    "UNPROCESSED": "QUALIFIED",
+    "SKIPPED": "DISQUALIFIED",
+}
+
 
 # ---------------------------------------------------------------------------
 # Errors and response payloads
@@ -482,3 +497,149 @@ def generate_lead_draft(session: Session, lead_id: int) -> LeadDraft:
     lead.updated_at = _now_iso()
     session.flush()
     return draft
+
+
+# ---------------------------------------------------------------------------
+# Unconstrained manual status override (Master Ledger)
+# ---------------------------------------------------------------------------
+
+
+def update_status(session: Session, lead_id: int, target_status: str) -> Lead:
+    """Force-set a lead's status to any valid lifecycle state.
+
+    Unlike :func:`transition_lead_status`, this handler does **not**
+    enforce the transition graph defined in
+    :data:`config.ALLOWED_TRANSITIONS`. It is used by the Master
+    Ledger's manual status override control (where an operator must be
+    able to force-correct any lead into any of the six valid states)
+    and by the Cold Triage Desk's live-send flow (where a successful
+    SMTP dispatch always forces the lead straight to ``SENT``
+    regardless of its current status).
+
+    Args:
+        session: The active SQLAlchemy session.
+        lead_id: The lead's primary key.
+        target_status: The requested target status. Must be one of
+            :data:`config.LEAD_STATES`.
+
+    Returns:
+        Lead: The updated lead row.
+
+    Raises:
+        LeadNotFoundError: If no lead with ``lead_id`` exists.
+        UnknownStatusError: If ``target_status`` is not one of the six
+            valid lifecycle states.
+    """
+    if target_status not in LEAD_STATES:
+        raise UnknownStatusError(target_status)
+
+    lead = session.get(Lead, lead_id)
+    if lead is None:
+        raise LeadNotFoundError(lead_id)
+
+    lead.status = target_status
+    lead.updated_at = _now_iso()
+    session.flush()
+    return lead
+
+
+# ---------------------------------------------------------------------------
+# Legacy data cleanup
+# ---------------------------------------------------------------------------
+
+
+def cleanup_legacy_statuses(session: Session) -> int:
+    """Rewrite legacy status strings onto the current lifecycle vocabulary.
+
+    Intended to be called once at application startup (before any UI
+    is rendered) so historical rows created by earlier pipeline
+    versions never surface a status outside
+    :data:`config.LEAD_STATES` and never crash status-aware UI
+    controls (badges, override dropdowns, transition graphs, etc.).
+    Maps ``EMAIL_1_SENT`` -> ``SENT``, ``UNPROCESSED`` -> ``QUALIFIED``,
+    and ``SKIPPED`` -> ``DISQUALIFIED`` per :data:`LEGACY_STATUS_MAP`.
+
+    Args:
+        session: The active SQLAlchemy session.
+
+    Returns:
+        int: The total number of lead rows that were rewritten.
+    """
+    total_updated = 0
+    now = _now_iso()
+    for legacy_status, current_status in LEGACY_STATUS_MAP.items():
+        result = session.execute(
+            update(Lead)
+            .where(Lead.status == legacy_status)
+            .values(status=current_status, updated_at=now)
+        )
+        total_updated += result.rowcount or 0
+    session.flush()
+    return total_updated
+
+
+# ---------------------------------------------------------------------------
+# Outreach dispatch support (Cold Triage Desk live send)
+# ---------------------------------------------------------------------------
+
+
+def count_leads_sent_today(session: Session) -> int:
+    """Count leads marked ``SENT`` with an ``updated_at`` timestamp today.
+
+    Used to render the sidebar's daily outreach send counter and to
+    enforce the configured daily send cap before a live SMTP dispatch
+    is attempted.
+
+    Args:
+        session: The active SQLAlchemy session.
+
+    Returns:
+        int: The number of ``leads`` rows whose ``status`` is
+            ``"SENT"`` and whose ``updated_at`` timestamp falls on
+            today's calendar date (local time).
+    """
+    today_prefix = datetime.now().date().isoformat()
+    stmt = select(func.count(Lead.id)).where(
+        Lead.status == "SENT",
+        Lead.updated_at.like(f"{today_prefix}%"),
+    )
+    return int(session.execute(stmt).scalar_one())
+
+
+def record_lead_touch(
+    session: Session,
+    lead_id: int,
+    *,
+    touch_type: str,
+    subject: str | None,
+    body: str | None,
+    status: str,
+) -> LeadTouch:
+    """Persist an outreach touch event for a lead.
+
+    Args:
+        session: The active SQLAlchemy session.
+        lead_id: The lead's primary key.
+        touch_type: The type of touch (e.g. ``"EMAIL"``).
+        subject: The subject line dispatched, if applicable.
+        body: The body content dispatched, if applicable.
+        status: The touch status (e.g. ``"SENT"``, ``"FAILED"``).
+
+    Returns:
+        LeadTouch: The newly created, persisted touch row.
+    """
+    now = _now_iso()
+    touch = LeadTouch(
+        lead_id=lead_id,
+        touch_type=touch_type,
+        subject=subject,
+        body=body,
+        status=status,
+        sent_at=now if status == "SENT" else None,
+        created_at=now,
+    )
+    session.add(touch)
+    session.flush()
+    return touch
+
+
