@@ -34,11 +34,11 @@ from lead_service import (
     UnknownStatusError,
     count_all_leads,
     create_lead,
-    generate_lead_draft,
     list_leads,
     transition_lead_status,
 )
 from models import Lead
+from templates_engine import render_draft
 
 # ---------------------------------------------------------------------------
 # Theme constants
@@ -384,15 +384,21 @@ def render_manual_ingestion() -> None:
 def render_triage_desk() -> None:
     """Render the Cold Triage Desk tab.
 
-    Displays ``QUALIFIED`` leads.  For each lead, the user can generate
-    a default personalized draft (first name + tech stack
-    interpolation), edit the subject/body, and transition the lead to
-    any legally allowed next status.
+    Presents a lead-selector dropdown scoped **exclusively** to leads
+    with ``status == "QUALIFIED"``. Selecting a lead auto-populates a
+    personalized email pitch draft (contact first name + tech stack
+    interpolation) via the deterministic Jinja2 template engine in
+    :mod:`templates_engine`, fully editable before queuing. The
+    "Queue Lead" action is the only lifecycle mutation available on
+    this desk: it persists the edited subject/body and transitions the
+    lead directly to ``QUEUED``. There is no LLM reasoning/evaluation
+    output anywhere on this desk, and no background AI evaluation loop
+    is ever triggered by this application.
     """
     st.subheader("Cold Triage Desk")
     st.caption(
-        "Generate a personalized draft, edit it, and move the lead "
-        "through the status lifecycle."
+        "Select a QUALIFIED lead, review the auto-populated pitch "
+        "draft, edit it if needed, and queue it for outreach."
     )
 
     with get_session() as session:
@@ -405,74 +411,68 @@ def render_triage_desk() -> None:
         st.info("No QUALIFIED leads awaiting triage.")
         return
 
-    for lead_dict in qualified_leads:
-        lead_id = int(lead_dict["id"])
-        render_lead_card(lead_dict)
+    lead_options = {
+        f"#{lead['id']} - {lead['company_name']} "
+        f"({lead.get('domain') or 'no domain'})": lead
+        for lead in qualified_leads
+    }
+    selected_label = st.selectbox(
+        "Select QUALIFIED lead", options=list(lead_options.keys())
+    )
+    lead_dict = lead_options[selected_label]
+    lead_id = int(lead_dict["id"])
 
-        with st.expander("Draft & Actions", expanded=False):
-            if st.button(
-                "Generate Draft", key=f"generate_draft_{lead_id}"
-            ):
-                with get_session() as session:
-                    draft = generate_lead_draft(session, lead_id)
-                st.session_state[f"subject_{lead_id}"] = draft.subject
-                st.session_state[f"body_{lead_id}"] = draft.body
-                st.rerun()
+    render_lead_card(lead_dict)
 
-            subject_value = st.session_state.get(
-                f"subject_{lead_id}", lead_dict.get("custom_subject") or ""
-            )
-            body_value = st.session_state.get(
-                f"body_{lead_id}", lead_dict.get("custom_pitch") or ""
-            )
+    subject_key = f"triage_subject_{lead_id}"
+    body_key = f"triage_body_{lead_id}"
 
-            edited_subject = st.text_input(
-                "Subject",
-                value=subject_value,
-                key=f"subject_input_{lead_id}",
-            )
-            edited_body = st.text_area(
-                "Body",
-                value=body_value,
-                height=180,
-                key=f"body_input_{lead_id}",
-            )
+    if subject_key not in st.session_state or body_key not in st.session_state:
+        draft = render_draft(
+            company_name=lead_dict["company_name"],
+            contact_name=lead_dict.get("contact_name"),
+            tech_stack=lead_dict.get("tech_stack"),
+        )
+        st.session_state[subject_key] = (
+            lead_dict.get("custom_subject") or draft.subject
+        )
+        st.session_state[body_key] = (
+            lead_dict.get("custom_pitch") or draft.body
+        )
 
-            allowed_targets = sorted(
-                ALLOWED_TRANSITIONS.get("QUALIFIED", frozenset())
-            )
-            if allowed_targets:
-                target_status = st.selectbox(
-                    "Move to status",
-                    options=allowed_targets,
-                    key=f"target_status_{lead_id}",
-                )
-                if st.button(
-                    f"Transition to {target_status}",
-                    key=f"transition_{lead_id}",
-                    type="primary",
-                ):
-                    with get_session() as session:
-                        lead = session.get(Lead, lead_id)
-                        if lead is not None:
-                            lead.custom_subject = edited_subject or None
-                            lead.custom_pitch = edited_body or None
-                        try:
-                            transition_lead_status(
-                                session, lead_id, target_status
-                            )
-                            st.success(
-                                f"Lead #{lead_id} moved to {target_status}."
-                            )
-                        except (
-                            LeadNotFoundError,
-                            UnknownStatusError,
-                            InvalidTransitionError,
-                        ) as exc:
-                            st.error(exc.payload.detail)
-                    st.rerun()
+    edited_subject = st.text_input("Subject", key=subject_key)
+    edited_body = st.text_area("Body", height=220, key=body_key)
 
-        st.divider()
+    col_regen, col_queue = st.columns([1, 1])
+    with col_regen:
+        if st.button("Regenerate Draft", key=f"regen_{lead_id}"):
+            draft = render_draft(
+                company_name=lead_dict["company_name"],
+                contact_name=lead_dict.get("contact_name"),
+                tech_stack=lead_dict.get("tech_stack"),
+            )
+            st.session_state[subject_key] = draft.subject
+            st.session_state[body_key] = draft.body
+            st.rerun()
+    with col_queue:
+        if st.button("Queue Lead", key=f"queue_{lead_id}", type="primary"):
+            with get_session() as session:
+                lead = session.get(Lead, lead_id)
+                if lead is not None:
+                    lead.custom_subject = edited_subject or None
+                    lead.custom_pitch = edited_body or None
+                try:
+                    transition_lead_status(session, lead_id, "QUEUED")
+                    st.success(f"Lead #{lead_id} queued for outreach.")
+                except (
+                    LeadNotFoundError,
+                    UnknownStatusError,
+                    InvalidTransitionError,
+                ) as exc:
+                    st.error(exc.payload.detail)
+            st.session_state.pop(subject_key, None)
+            st.session_state.pop(body_key, None)
+            st.rerun()
 
 
 def render_master_ledger() -> None:

@@ -4,8 +4,6 @@
 
 B2B Substrate is a local-first Streamlit application for manually logging B2B leads, deduplicating them against existing records, tracking them through a strict six-state status lifecycle, and generating a personalized outreach draft via a lightweight Jinja2 interpolation engine.
 
-As of the Phase 4 backend refactor, this application has **zero dependency** on any LLM/Vertex AI provider, web scraper, DNS/SMTP verification library, or outbound mail relay. Persistence runs through a SQLAlchemy ORM layer mapped explicitly onto the pre-existing SQLite schema.
-
 ---
 
 ## Table of Contents
@@ -59,7 +57,7 @@ As of the Phase 4 backend refactor, this application has **zero dependency** on 
 1. **Ingest** — The user submits the Manual Ingestion form.
 2. **Deduplicate** — `email`/`website` are normalized and checked against every existing lead; a duplicate raises a structured 409 Conflict.
 3. **Default status** — New leads are always created with status `QUALIFIED`.
-4. **Triage** — The Cold Triage Desk generates a personalized draft (first name + tech stack), lets the user edit it, and moves the lead through the lifecycle.
+4. **Triage** — The Cold Triage Desk dropdown lists only `QUALIFIED` leads; selecting one auto-populates a personalized pitch draft (first name + tech stack) that stays fully editable; clicking **Queue Lead** persists the edit and moves the lead straight to `QUEUED`.
 5. **Ledger** — The Master Ledger provides full search/filter and a manual status-override control constrained to the legal transition graph.
 
 ---
@@ -157,9 +155,10 @@ The full transition graph lives in `config.ALLOWED_TRANSITIONS` and is enforced 
 ### Workflow 2 — Cold Triage Desk
 
 1. Navigate to the **❄️ Cold Triage Desk** tab.
-2. Click **Generate Draft** on a `QUALIFIED` lead to render a personalized subject/body.
-3. Edit the draft inline if desired.
-4. Select a target status and click **Transition to ...**.
+2. Select a lead from the dropdown — the selector exclusively lists leads with `status == QUALIFIED`.
+3. The subject/body pitch draft is auto-populated via the Jinja2 interpolation helper (contact first name + tech stack). Edit it freely — it remains fully editable at all times.
+4. Optionally click **Regenerate Draft** to re-render the default template (discarding manual edits).
+5. Click **Queue Lead** to persist the edited draft and transition the lead directly to `QUEUED`.
 
 ### Workflow 3 — Master Ledger
 
