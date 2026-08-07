@@ -18,7 +18,12 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy import ForeignKey, Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    mapped_column,
+    relationship,
+)
 
 
 class Base(DeclarativeBase):
@@ -87,34 +92,64 @@ class Lead(Base):
 
     __tablename__ = "leads"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
     company_name: Mapped[str] = mapped_column(Text, nullable=False)
-    domain: Mapped[Optional[str]] = mapped_column(Text, unique=True, nullable=True)
-    verified_email: Mapped[Optional[str]] = mapped_column(Text, unique=True, nullable=True)
+    domain: Mapped[Optional[str]] = mapped_column(
+        Text, unique=True, nullable=True
+    )
+    verified_email: Mapped[Optional[str]] = mapped_column(
+        Text, unique=True, nullable=True
+    )
     contact_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tech_stack: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     website_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    sanitized_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    qualification_verdict: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sanitized_text: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    qualification_verdict: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
     reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     custom_pitch: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    custom_subject: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    search_helpers: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="QUALIFIED")
+    custom_subject: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    search_helpers: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="QUALIFIED"
+    )
     created_at: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[str] = mapped_column(Text, nullable=False)
-    email_1_sent_at: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    followup_1_due_date: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    followup_1_sent_at: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    followup_2_due_date: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    breakup_sent_at: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    email_1_sent_at: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    followup_1_due_date: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    followup_1_sent_at: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    followup_2_due_date: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    breakup_sent_at: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
     replied_at: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     skipped_at: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     bounced_at: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    email_candidates: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    mailbox_status: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    email_candidates: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    mailbox_status: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
 
     touches: Mapped[list["LeadTouch"]] = relationship(
         "LeadTouch",
@@ -146,16 +181,20 @@ class LeadTouch(Base):
         touch_type: The type of touch (e.g. ``EMAIL``, ``NOTE``).
         subject: Optional subject line for email-type touches.
         body: The touch body/content.
-        status: The touch status (e.g. ``DRAFT``, ``SENT``, ``FAILED``).
+        status: The touch status (e.g. ``DRAFT``, ``SENT``,
+            ``FAILED``).
         sent_at: ISO-8601 dispatch timestamp, or ``None`` when the
             touch has not been dispatched.
         created_at: ISO-8601 creation timestamp.
-        lead: Many-to-one relationship back to the parent :class:`Lead`.
+        lead: Many-to-one relationship back to the parent
+            :class:`Lead`.
     """
 
     __tablename__ = "lead_touches"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
     lead_id: Mapped[int] = mapped_column(
         Integer,
         ForeignKey("leads.id", ondelete="CASCADE"),

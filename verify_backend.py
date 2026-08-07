@@ -17,7 +17,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from config import ALLOWED_TRANSITIONS, LEAD_STATES
@@ -35,17 +35,22 @@ from templates_engine import extract_first_name, render_draft
 
 
 def main() -> None:
-    """Run all backend verification checks and print the results."""
+    """Run all backend verification checks and print the results.
+
+    Raises:
+        AssertionError: If any deterministic backend assertion fails,
+            causing the script to exit with a non-zero status code.
+    """
     print("--- B2B Substrate Backend Verification ---")
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         db_path = Path(tmp) / "verify.db"
         engine = create_engine(f"sqlite:///{db_path}", future=True)
         Base.metadata.create_all(engine)
-        SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+        session_local = sessionmaker(bind=engine, expire_on_commit=False)
 
         # 1. Manual ingestion: happy path -> QUALIFIED status.
-        with SessionLocal() as session:
+        with session_local() as session:
             lead = create_lead(
                 session,
                 company_name="Acme Corp",
@@ -66,7 +71,7 @@ def main() -> None:
             )
 
         # 2. Deduplication: duplicate email -> DuplicateLeadError (409).
-        with SessionLocal() as session:
+        with session_local() as session:
             try:
                 create_lead(
                     session,
@@ -78,10 +83,13 @@ def main() -> None:
                 payload = exc.payload.to_dict()
                 assert payload["status_code"] == 409
                 assert payload["field"] == "email"
-            print("[OK] create_lead: duplicate email -> 409 DuplicateLeadError")
+            print(
+                "[OK] create_lead: duplicate email -> 409 "
+                "DuplicateLeadError"
+            )
 
         # 3. Deduplication: duplicate website -> DuplicateLeadError (409).
-        with SessionLocal() as session:
+        with session_local() as session:
             try:
                 create_lead(
                     session,
@@ -94,11 +102,12 @@ def main() -> None:
                 assert payload["status_code"] == 409
                 assert payload["field"] == "website"
             print(
-                "[OK] create_lead: duplicate website -> 409 DuplicateLeadError"
+                "[OK] create_lead: duplicate website -> 409 "
+                "DuplicateLeadError"
             )
 
         # 4. Status lifecycle: legal transition QUALIFIED -> QUEUED.
-        with SessionLocal() as session:
+        with session_local() as session:
             leads = list_leads(session, search_term="Acme Corp")
             lead_id = leads[0].id
             updated = transition_lead_status(session, lead_id, "QUEUED")
@@ -107,26 +116,27 @@ def main() -> None:
             print("[OK] transition_lead_status: QUALIFIED -> QUEUED allowed")
 
         # 5. Status lifecycle: illegal transition QUEUED -> REPLIED rejected.
-        with SessionLocal() as session:
+        with session_local() as session:
             try:
                 transition_lead_status(session, lead_id, "REPLIED")
                 raise AssertionError("Expected InvalidTransitionError")
             except InvalidTransitionError as exc:
                 assert exc.payload.status_code == 400
             print(
-                "[OK] transition_lead_status: QUEUED -> REPLIED rejected (400)"
+                "[OK] transition_lead_status: QUEUED -> REPLIED "
+                "rejected (400)"
             )
 
         # 6. Status lifecycle: unknown status rejected.
-        with SessionLocal() as session:
+        with session_local() as session:
             try:
                 transition_lead_status(session, lead_id, "UNPROCESSED")
                 raise AssertionError("Expected UnknownStatusError")
             except UnknownStatusError as exc:
                 assert exc.payload.status_code == 400
             print(
-                "[OK] transition_lead_status: UNPROCESSED rejected as unknown "
-                "status"
+                "[OK] transition_lead_status: UNPROCESSED rejected as "
+                "unknown status"
             )
 
         # 7. LEAD_STATES contains exactly the six required states, no
@@ -164,26 +174,26 @@ def main() -> None:
         assert "FastAPI, Postgres" in draft.body
         assert "Leon AI" in draft.subject
         print(
-            "[OK] render_draft: interpolates first_name + tech_stack into "
-            "draft"
+            "[OK] render_draft: interpolates first_name + tech_stack "
+            "into draft"
         )
 
         # 10. generate_lead_draft persists subject/body onto the lead row.
-        with SessionLocal() as session:
+        with session_local() as session:
             rendered = generate_lead_draft(session, lead_id)
             session.commit()
-        with SessionLocal() as session:
+        with session_local() as session:
             persisted = session.get(Lead, lead_id)
             assert persisted is not None
             assert persisted.custom_subject == rendered.subject
             assert persisted.custom_pitch == rendered.body
         print(
-            "[OK] generate_lead_draft: persists rendered subject/body onto "
-            "the lead"
+            "[OK] generate_lead_draft: persists rendered subject/body "
+            "onto the lead"
         )
 
         # 11. Lead.touches relationship + cascade delete-orphan.
-        with SessionLocal() as session:
+        with session_local() as session:
             touch_lead = create_lead(session, company_name="Touch Co")
             session.flush()
             touch = LeadTouch(
@@ -198,7 +208,7 @@ def main() -> None:
             session.commit()
             touch_lead_id = touch_lead.id
 
-        with SessionLocal() as session:
+        with session_local() as session:
             reloaded = session.get(Lead, touch_lead_id)
             assert reloaded is not None
             assert len(reloaded.touches) == 1
@@ -206,16 +216,20 @@ def main() -> None:
             session.delete(reloaded)
             session.commit()
 
-        with SessionLocal() as session:
-            from sqlalchemy import select
-
-            orphans = session.execute(
-                select(LeadTouch).where(LeadTouch.lead_id == touch_lead_id)
-            ).scalars().all()
+        with session_local() as session:
+            orphans = (
+                session.execute(
+                    select(LeadTouch).where(
+                        LeadTouch.lead_id == touch_lead_id
+                    )
+                )
+                .scalars()
+                .all()
+            )
             assert orphans == []
         print(
-            "[OK] Lead.touches <-> LeadTouch.lead: relationship + cascade "
-            "delete-orphan works"
+            "[OK] Lead.touches <-> LeadTouch.lead: relationship + "
+            "cascade delete-orphan works"
         )
 
         engine.dispose()
