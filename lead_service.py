@@ -544,8 +544,73 @@ def update_status(session: Session, lead_id: int, target_status: str) -> Lead:
 
 
 # ---------------------------------------------------------------------------
+# Manual field editing (Master Ledger inline editor)
+# ---------------------------------------------------------------------------
+
+
+def update_lead_fields(
+    session: Session,
+    lead_id: int,
+    *,
+    contact_name: str | None = None,
+    email: str | None = None,
+    website: str | None = None,
+    tech_stack: str | None = None,
+    notes: str | None = None,
+) -> Lead:
+    """Handle a Master Ledger inline field-edit request.
+
+    Overwrites ``contact_name``, ``verified_email`` (from ``email``),
+    ``domain`` (from ``website``), ``tech_stack``, and ``notes`` on the
+    target lead. Empty strings, whitespace-only strings, and ``None``
+    are all treated identically and persisted as SQL ``NULL`` rather
+    than as an empty string, mirroring the semantics already used by
+    :func:`create_lead`. ``email`` and ``website`` are normalized via
+    :func:`normalize_email` and :func:`normalize_website` respectively
+    for storage consistency with manually-ingested leads.
+
+    Args:
+        session: The active SQLAlchemy session.
+        lead_id: The lead's primary key.
+        contact_name: The contact person's full name, or ``None``/empty
+            to clear the field.
+        email: The contact's email address, or ``None``/empty to clear
+            the field. Stored on ``Lead.verified_email``.
+        website: The company website URL or bare domain, or
+            ``None``/empty to clear the field. Stored on ``Lead.domain``.
+        tech_stack: A free-text technology stack summary, or
+            ``None``/empty to clear the field.
+        notes: Free-form notes about the lead, or ``None``/empty to
+            clear the field.
+
+    Returns:
+        Lead: The updated lead row.
+
+    Raises:
+        LeadNotFoundError: If no lead with ``lead_id`` exists.
+    """
+    lead = session.get(Lead, lead_id)
+    if lead is None:
+        raise LeadNotFoundError(lead_id)
+
+    lead.contact_name = (
+        contact_name.strip() if contact_name and contact_name.strip() else None
+    )
+    lead.verified_email = normalize_email(email)
+    lead.domain = normalize_website(website)
+    lead.tech_stack = (
+        tech_stack.strip() if tech_stack and tech_stack.strip() else None
+    )
+    lead.notes = notes.strip() if notes and notes.strip() else None
+    lead.updated_at = _now_iso()
+    session.flush()
+    return lead
+
+
+# ---------------------------------------------------------------------------
 # Legacy data cleanup
 # ---------------------------------------------------------------------------
+
 
 
 def cleanup_legacy_statuses(session: Session) -> int:

@@ -39,8 +39,10 @@ from lead_service import (
     create_lead,
     list_leads,
     record_lead_touch,
+    update_lead_fields,
     update_status,
 )
+
 from models import Lead
 from templates_engine import render_draft
 
@@ -662,10 +664,79 @@ def render_master_ledger() -> None:
                 st.error(exc.payload.detail)
         st.rerun()
 
+    st.divider()
+
+    with st.expander("✏️ Edit Lead Details", expanded=False):
+        edit_lead_options = {
+            f"#{lead['id']} - {lead['company_name']} "
+            f"({lead.get('domain') or 'no domain'})": int(lead["id"])
+            for lead in leads
+        }
+        edit_selected_label = st.selectbox(
+            "Select lead to edit",
+            options=list(edit_lead_options.keys()),
+            key="edit_lead_selector",
+        )
+        edit_selected_id = edit_lead_options[edit_selected_label]
+
+        with get_session() as session:
+            edit_lead = session.get(Lead, edit_selected_id)
+            edit_lead_snapshot = (
+                lead_to_dict(edit_lead) if edit_lead is not None else None
+            )
+
+        if edit_lead_snapshot is None:
+            st.warning("Selected lead could not be loaded.")
+        else:
+            with st.form(f"edit_lead_form_{edit_selected_id}"):
+                edit_contact_name = st.text_input(
+                    "Contact Name",
+                    value=edit_lead_snapshot.get("contact_name") or "",
+                )
+                edit_email = st.text_input(
+                    "Verified Email",
+                    value=edit_lead_snapshot.get("verified_email") or "",
+                )
+                edit_website = st.text_input(
+                    "Website",
+                    value=edit_lead_snapshot.get("domain") or "",
+                )
+                edit_tech_stack = st.text_input(
+                    "Tech Stack",
+                    value=edit_lead_snapshot.get("tech_stack") or "",
+                )
+                edit_notes = st.text_area(
+                    "Notes",
+                    value=edit_lead_snapshot.get("notes") or "",
+                    height=100,
+                )
+
+                save_clicked = st.form_submit_button(
+                    "Save & Update Lead", type="primary"
+                )
+
+            if save_clicked:
+                with get_session() as session:
+                    try:
+                        update_lead_fields(
+                            session,
+                            edit_selected_id,
+                            contact_name=edit_contact_name or None,
+                            email=edit_email or None,
+                            website=edit_website or None,
+                            tech_stack=edit_tech_stack or None,
+                            notes=edit_notes or None,
+                        )
+                        st.success("Lead updated successfully!")
+                    except LeadNotFoundError as exc:
+                        st.error(exc.payload.detail)
+                st.rerun()
+
 
 # ---------------------------------------------------------------------------
 # Main application
 # ---------------------------------------------------------------------------
+
 
 
 def main() -> None:
