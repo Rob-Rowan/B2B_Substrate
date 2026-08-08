@@ -21,19 +21,20 @@ from jinja2 import Environment, StrictUndefined
 # ---------------------------------------------------------------------------
 
 #: Default subject line template for the Cold Triage desk draft.
-DEFAULT_SUBJECT_TEMPLATE: str = "quick question about {{ company_name }}"
+DEFAULT_SUBJECT_TEMPLATE: str = "quick dev question"
 
 #: Default plain-text body template for the Cold Triage desk draft.
 DEFAULT_BODY_TEMPLATE: str = (
     "Hi {{ first_name }},\n\n"
-    "I came across {{ company_name }} and wanted to reach out."
-    "{% if tech_stack %} "
-    "Noticed you're working with {{ tech_stack }} — I help teams like "
-    "yours with backend engineering support, integrations, and scaling "
-    "work around that stack.{% else %} I help teams like yours with "
-    "backend engineering support, integrations, and scaling work."
-    "{% endif %}\n\n"
-    "Would you be open to a quick 15-minute call this week?\n\n"
+    "Do you guys ever hit an execution bottleneck when client "
+    "builds demand custom Python microservices,heavy pipelines, "
+    "automation, or complex APIs?"
+    "I’m a senior Python backend engineer. I step in as an async, "
+    "100% white-label sub-contractor to take those complex API integrations "
+    "and pipeline builds off your plate under your agency banner. "
+    "No full-time overhead, and your clients never know I existed.\n\n"
+    "Got any backlogged backend tasks sitting on your team's plate right "
+    "now where an extra senior dev helps?\n\n"
     "Best,\n"
     "Rob Rowan"
 )
